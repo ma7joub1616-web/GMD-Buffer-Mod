@@ -224,7 +224,7 @@ $on_mod(Loaded) {
     }
     listenForSettingChanges<bool>("debug", [](bool) { loadSettings(); });
 
-    log::info("[InputBuffer] BufferMod loaded (v19: wave tap + spawn fix). Main: {}, TPS: {}, wave: {}",
+    log::info("[InputBuffer] BufferMod loaded (v1.0.3: diagnostics + hold-length). Main: {}, TPS: {}, wave: {}",
               STAGE_NAMES[g_stage], TPS_PRESETS[g_tpsIndex], waveModeName());
 }
 
@@ -278,6 +278,8 @@ struct PState {
     int pendingStart = 0;
     int lastRingCount = 0;
     bool releaseNext = false;
+    int rescueReleaseAt = 0;   // step at which a rescued click is released
+    int pendingHold = 1;       // how many steps the early click was physically held
 
     int pressStep = -1;
     bool delayedRelease = false;
@@ -381,7 +383,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             }
         }
 
-        if (s.releaseNext) {
+        if (s.releaseNext && step >= s.rescueReleaseAt) {
             s.releaseNext = false;
             if (!s.held) sendInput(p, idx, false, true);
         }
@@ -419,6 +421,7 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             } else {
                 sendInput(p, idx, true, true);
                 s.releaseNext = true;
+                s.rescueReleaseAt = step + std::clamp(s.pendingHold, 1, 120);
                 log::info("[InputBuffer] *** SAVED +{:.1f} TICKS ({:.2f} frames @ 60fps) PRESS! [{} {} {}] (Step0: {} -> Delayed: {}) [Limit: {} steps] ***",
                           ticksSaved, ticksSaved / 4.0f, tag, modeName(p), what,
                           s.pendingStart, step, limit);
@@ -495,6 +498,9 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             }
         }
 
+        if (!down && s.pending) {
+            s.pendingHold = std::max(1, step - s.pendingStart);
+        }
         s.held = down;
 
         if (down) {
@@ -504,9 +510,16 @@ class $modify(BufferLayer, GJBaseGameLayer) {
             if (early && modeLimitSteps(p) > 0) {
                 s.pending = true;
                 s.pendingStart = step;
+                s.pendingHold = 1;
                 s.lastRingCount = 0;
+                DBG("[InputBuffer] {} click ARMED at step {} (mode={}, window={} steps)",
+                    tag, step, modeName(p), modeLimitSteps(p));
             } else {
                 s.pending = false;
+                if (isGroundMode(p)) {
+                    DBG("[InputBuffer] {} click NOT buffered (mode={}, onGround={}, rings={}, window={} steps)",
+                        tag, modeName(p), p->m_isOnGround, ringsTouching(p), modeLimitSteps(p));
+                }
             }
         }
         return false;
@@ -515,6 +528,12 @@ class $modify(BufferLayer, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto f = m_fields.operator->();
         f->step++;
+        static bool s_seenCommands = false;
+        if (!s_seenCommands && PlayLayer::get()) {
+            s_seenCommands = true;
+            log::info("[InputBuffer] hook check: processCommands is running (main window {} = {} steps, TPS setting {})",
+                      STAGE_NAMES[g_stage], mainLimitSteps(), TPS_PRESETS[g_tpsIndex]);
+        }
         pollKeys();
         syncState();
 
@@ -532,6 +551,12 @@ class $modify(BufferLayer, GJBaseGameLayer) {
     void handleButton(bool down, int button, bool isPlayer1) {
         auto f = m_fields.operator->();
         syncState();
+        static bool s_seenButton = false;
+        if (!s_seenButton && PlayLayer::get()) {
+            s_seenButton = true;
+            log::info("[InputBuffer] hook check: handleButton is running (button {}, {})",
+                      button, down ? "down" : "up");
+        }
 
         if (PlayLayer::get() && button == 1) {
             int idx = isPlayer1 ? 0 : 1;
